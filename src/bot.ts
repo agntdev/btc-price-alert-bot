@@ -1,6 +1,7 @@
 import { Bot, session, type Context, type SessionFlavor } from "grammy";
 import type { DbClient } from "./db/index.js";
 import { registerStatusCommand } from "./commands/status.js";
+import { registerPriceCommand } from "./commands/price.js";
 
 export interface SessionData {
   userId?: number;
@@ -19,6 +20,7 @@ export function createBot(token: string, db: DbClient) {
   );
 
   registerStatusCommand(bot, db);
+  registerPriceCommand(bot);
 
   bot.catch((err) => {
     console.error("Bot error:", err.error);
