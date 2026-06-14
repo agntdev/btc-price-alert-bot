@@ -3,6 +3,7 @@ import type { DbClient } from "./db/index.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerPriceCommand } from "./commands/price.js";
 import { sendMessage } from "./sender.js";
+import { startPriceMonitoring } from "./monitor.js";
 
 export interface SessionData {
   userId?: number;
@@ -42,6 +43,8 @@ export function createBot(token: string, db: DbClient) {
 
   registerStatusCommand(bot, db);
   registerPriceCommand(bot);
+
+  startPriceMonitoring(bot.api, db);
 
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text;
