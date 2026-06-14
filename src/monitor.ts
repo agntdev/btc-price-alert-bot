@@ -3,6 +3,7 @@ import { fetchBtcPrice, CoinGeckoError } from "./api/coingecko.js";
 import { db as defaultDb, type DbClient } from "./db/index.js";
 import { priceRecords, users, telegramChats } from "./db/schema.js";
 import { desc } from "drizzle-orm";
+import { saveAlertToDb, sendAlertMessage } from "./alert.js";
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const ALERT_THRESHOLD_PERCENT = 10;
@@ -11,19 +12,10 @@ export interface AlertParams {
   percentageChange: number;
   currentPrice: number;
   referencePrice: number;
+  priceRecordId: number;
 }
 
 export type AlertCallback = (params: AlertParams) => Promise<void>;
-
-function formatAlertMessage(
-  directionEmoji: string,
-  direction: string,
-  absChange: number,
-  price: number,
-): string {
-  const formatted = `$${price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  return `${directionEmoji} Bitcoin price ${direction}${absChange.toFixed(1)}%! Current price: ${formatted}`;
-}
 
 function getOrCreateSystemUser(database: DbClient): { id: number } {
   const [existing] = database.select().from(users).limit(1).all();
@@ -55,38 +47,52 @@ export function startPriceMonitoring(
         ((currentPrice - referencePrice) / referencePrice) * 100;
 
       const now = new Date().toISOString();
-      database.insert(priceRecords).values({
+      const result = database.insert(priceRecords).values({
         price: currentPrice,
         timestamp: now,
         userId: user.id,
       }).run();
+
+      const priceRecordId = Number(result.lastInsertRowid);
 
       if (Math.abs(percentageChange) >= ALERT_THRESHOLD_PERCENT) {
         const params: AlertParams = {
           percentageChange,
           currentPrice,
           referencePrice,
+          priceRecordId,
         };
 
         if (onAlert) {
+          const [chatRecord] = database
+            .select()
+            .from(telegramChats)
+            .limit(1)
+            .all();
+
+          if (chatRecord) {
+            saveAlertToDb(database, {
+              percentageChange,
+              currentPrice,
+              priceRecordId,
+              chatRecordId: chatRecord.id,
+            });
+          }
           await onAlert(params);
         } else {
           const [chatRecord] = database
-              .select()
-              .from(telegramChats)
-              .limit(1)
-              .all();
+            .select()
+            .from(telegramChats)
+            .limit(1)
+            .all();
 
           if (chatRecord) {
-            const isUp = percentageChange >= 0;
-            const message = formatAlertMessage(
-              isUp ? "🚀" : "⚠️",
-              isUp ? "increased by +" : "decreased by -",
-              Math.abs(percentageChange),
+            await sendAlertMessage(api, database, {
+              percentageChange,
               currentPrice,
-            );
-            await api.sendMessage(chatRecord.chatId, message, {
-              parse_mode: "HTML",
+              priceRecordId,
+              chatRecordId: chatRecord.id,
+              chatId: chatRecord.chatId,
             });
           }
         }
