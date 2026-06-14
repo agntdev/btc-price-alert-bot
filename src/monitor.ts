@@ -1,12 +1,15 @@
 import { type Api } from "grammy";
 import { fetchBtcPrice, CoinGeckoError } from "./api/coingecko.js";
+import { withRetry, createCooldownState, recordSuccess, recordFailure } from "./api/retry.js";
 import { db as defaultDb, type DbClient } from "./db/index.js";
 import { priceRecords, users, telegramChats } from "./db/schema.js";
 import { desc } from "drizzle-orm";
 import { saveAlertToDb, sendAlertMessage } from "./alert.js";
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_POLL_INTERVAL_MS = 30 * 60 * 1000;
 const ALERT_THRESHOLD_PERCENT = 10;
+const MAX_RETRIES = 3;
 
 export interface AlertParams {
   percentageChange: number;
@@ -30,10 +33,22 @@ export function startPriceMonitoring(
   onAlert?: AlertCallback,
 ) {
   const user = getOrCreateSystemUser(database);
+  const cooldown = createCooldownState(POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   const poll = async () => {
     try {
-      const currentPrice = await fetchBtcPrice();
+      const currentPrice = await withRetry(() => fetchBtcPrice(), {
+        maxRetries: MAX_RETRIES,
+        onRetry: (attempt, err) => {
+          const msg =
+            err instanceof CoinGeckoError
+              ? `CoinGecko error (${err.code}): ${err.message}`
+              : `Unexpected error: ${err}`;
+          console.error(`[monitor] Retry ${attempt}/${MAX_RETRIES}:`, msg);
+        },
+      });
 
       const [latestRecord] = database
         .select()
@@ -97,20 +112,31 @@ export function startPriceMonitoring(
           }
         }
       }
+
+      recordSuccess(cooldown);
     } catch (err) {
+      const newInterval = recordFailure(cooldown);
       if (err instanceof CoinGeckoError) {
-        console.error(`[monitor] CoinGecko error (${err.code}):`, err.message);
+        console.error(
+          `[monitor] CoinGecko error (${err.code}) after ${MAX_RETRIES} retries:`,
+          err.message,
+        );
       } else {
-        console.error("[monitor] Unexpected error:", err);
+        console.error("[monitor] Unexpected error after retries:", err);
       }
+      console.error(
+        `[monitor] ${cooldown.consecutiveFailures} consecutive failure(s). Next poll in ${Math.round(newInterval / 1000)}s.`,
+      );
     }
+
+    timeoutId = setTimeout(poll, cooldown.currentIntervalMs);
   };
 
   void poll();
 
-  const timer = setInterval(poll, POLL_INTERVAL_MS);
-
   return {
-    stop: () => clearInterval(timer),
+    stop: () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    },
   };
 }
